@@ -1,12 +1,10 @@
 {
   "functions": {
-    "api/scan.ts": {
+    "api/**/*.ts": {
       "runtime": "nodejs20.x",
       "memory": 1024,
       "maxDuration": 60
     }
-  },
-  "buildCommand": "npm install && npm run lint",
-  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- . || exit 1"
+  }
 }
 
