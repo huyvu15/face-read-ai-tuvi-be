@@ -1,0 +1,19 @@
+{
+  "name": "vercel-face-scan-backend",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.940.0",
+    "@google/genai": "^1.30.0"
+  },
+  "devDependencies": {
+    "@vercel/node": "^3.1.12",
+    "typescript": "~5.8.2"
+  }
+}
+

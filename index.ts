@@ -1,0 +1,236 @@
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import { GoogleGenAI, Type, Schema } from '@google/genai';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetBucketLocationCommand,
+} from '@aws-sdk/client-s3';
+import { BiometricAnalysis } from '../types';
+
+const stripQuotes = (value?: string) => value?.replace(/^"(.*)"$/, '$1') ?? '';
+
+const requireEnv = (key: string): string => {
+  const value = stripQuotes(process.env[key]);
+  if (!value) {
+    throw new Error(`Thiếu biến môi trường ${key}`);
+  }
+  return value;
+};
+
+const optionalEnv = (key: string, fallback = ''): string =>
+  stripQuotes(process.env[key]) || fallback;
+
+const bucket = requireEnv('S3_BUCKET');
+const folder = optionalEnv('S3_FOLDER', 'person_image');
+const preferredRegion =
+  optionalEnv('S3_REGION') ||
+  optionalEnv('AWS_REGION') ||
+  optionalEnv('AWS_DEFAULT_REGION') ||
+  '';
+
+const credentials = {
+  accessKeyId: requireEnv('AWS_ACCESS_KEY_ID'),
+  secretAccessKey: requireEnv('AWS_SECRET_ACCESS_KEY'),
+};
+
+let resolvedRegion: string | null = null;
+let s3Client: S3Client | null = null;
+
+const normalizeRegion = (value?: string | null) => {
+  if (!value || value === 'us-east-1') return 'us-east-1';
+  if (value === 'EU') return 'eu-west-1';
+  return value;
+};
+
+const ensureRegion = async () => {
+  if (resolvedRegion) return resolvedRegion;
+  if (preferredRegion) {
+    resolvedRegion = preferredRegion;
+    return resolvedRegion;
+  }
+
+  const discoveryClient = new S3Client({
+    region: 'us-east-1',
+    credentials,
+  });
+  const result = await discoveryClient.send(
+    new GetBucketLocationCommand({ Bucket: bucket }),
+  );
+  resolvedRegion = normalizeRegion(result.LocationConstraint) || 'us-east-1';
+  return resolvedRegion;
+};
+
+const getS3Client = async () => {
+  if (s3Client) return s3Client;
+  const region = await ensureRegion();
+  s3Client = new S3Client({
+    region,
+    credentials,
+  });
+  return s3Client;
+};
+
+const sanitizeFolder = (input: string) =>
+  input.replace(/^\/+/, '').replace(/\/+$/, '');
+
+const generateObjectKey = () => {
+  const safeFolder = sanitizeFolder(folder);
+  const id =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const prefix = safeFolder ? `${safeFolder}/` : '';
+  return `${prefix}${timestamp}-${id}.jpg`;
+};
+
+const base64ToBuffer = (base64Image: string) => {
+  const clean = base64Image.replace(/^data:image\/\w+;base64,/, '');
+  return Buffer.from(clean, 'base64');
+};
+
+const persistScanResult = async (base64Image: string) => {
+  const objectKey = generateObjectKey();
+  const body = base64ToBuffer(base64Image);
+  const client = await getS3Client();
+  const region = await ensureRegion();
+
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: objectKey,
+        Body: body,
+        ContentType: 'image/jpeg',
+      }),
+    );
+  } catch (error) {
+    console.error('[s3] Upload failed', { region, bucket, objectKey, error });
+    throw error;
+  }
+
+  return { objectKey, region };
+};
+
+const ai = new GoogleGenAI({ apiKey: requireEnv('GEMINI_API_KEY') });
+
+const analysisSchema: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    estimatedAge: { type: Type.INTEGER, description: 'Tuổi dự đoán' },
+    beautyScore: { type: Type.INTEGER, description: 'Điểm nhan sắc' },
+    lifeQuote: { type: Type.STRING, description: 'Câu nói' },
+    archetype: { type: Type.STRING, description: 'Danh xưng' },
+    fortune: {
+      type: Type.OBJECT,
+      properties: {
+        thienDinh: { type: Type.STRING },
+        taiBach: { type: Type.STRING },
+        phuThe: { type: Type.STRING },
+        tongQuan: { type: Type.STRING },
+      },
+      required: ['thienDinh', 'taiBach', 'phuThe', 'tongQuan'],
+    },
+  },
+  required: ['estimatedAge', 'beautyScore', 'lifeQuote', 'archetype', 'fortune'],
+};
+
+const analyzeImage = async (base64Image: string): Promise<BiometricAnalysis> => {
+  const cleanBase64 = base64Image.replace(/^data:image\/(png|jpeg|webp);base64,/, '');
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: {
+      parts: [
+        {
+          inlineData: {
+            data: cleanBase64,
+            mimeType: 'image/jpeg',
+          },
+        },
+        {
+          text: "Bạn là một Đại Sư Nhân Tướng Học uyên bác, thông thạo kinh dịch và tướng pháp cổ truyền. Nhiệm vụ của bạn là xem tướng qua ảnh và đưa ra lời phán xét.\n\nQUAN TRỌNG: Hãy dùng văn phong cổ điển, trang trọng, sử dụng nhiều từ Hán Việt hoa mỹ (như 'khí sắc', 'thần thái', 'hậu vận', 'cung mệnh'). Tuyệt đối KHÔNG dùng ngôn ngữ teen, slang hiện đại hay tiếng Anh.\n\n1. Dự đoán tuổi: Trừ đi vài tuổi để làm vui lòng gia chủ.\n2. Điểm nhan sắc: Chấm điểm hào phóng (85-100).\n3. Danh xưng: Đặt một biệt hiệu nghe thật oai phong lẫm liệt hoặc thoát tục.\n4. Câu nói (Quote): Một câu chiêm nghiệm sâu sắc về cuộc đời hoặc một câu thơ cổ khen ngợi khí chất.\n\n5. PHÂN TÍCH TƯỚNG SỐ (Tập trung khen ngợi - 'Nịnh thần thánh'):\n- Thiên Đình (Trán): Khen vầng trán biểu thị trí tuệ siêu việt.\n- Tài Bạch (Mũi): Khen mũi biểu thị tài vận hanh thông.\n- Phu Thê/Tử Tức (Mắt/Miệng): Khen mắt/miệng biểu thị duyên lành, gia đạo êm ấm.\n- Tổng quan: Chốt lại hậu vận rực rỡ, đại cát đại lợi.",
+        },
+      ],
+    },
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: analysisSchema,
+      systemInstruction:
+        "Bạn là bậc thầy tướng số chỉ nhìn thấy Phúc Tướng. Hãy nói những lời đẹp đẽ nhất, khiến người nghe tin rằng họ mang thiên mệnh rạng ngời.",
+    },
+  });
+
+  let text = response.text || '';
+
+  if (text.includes('```json')) {
+    text = text.replace(/```json\n?|\n?```/g, '');
+  } else if (text.includes('```')) {
+    text = text.replace(/```\n?|\n?```/g, '');
+  }
+
+  if (!text) {
+    throw new Error('Không nhận được dữ liệu từ máy quét.');
+  }
+
+  return JSON.parse(text) as BiometricAnalysis;
+};
+
+const app = express();
+
+app.use(
+  cors({
+    origin: optionalEnv('CORS_ORIGIN') || true,
+  }),
+);
+app.use(express.json({ limit: '15mb' }));
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.post('/api/scan', async (req, res) => {
+  try {
+    const { image } = req.body ?? {};
+    if (!image || typeof image !== 'string') {
+      return res.status(400).json({ detail: 'Thiếu dữ liệu ảnh base64.' });
+    }
+
+    console.log('[scan] nhận ảnh, bắt đầu phân tích...');
+
+    const analysis = await analyzeImage(image);
+    const { objectKey: imageKey, region } = await persistScanResult(image);
+
+    const domain =
+      region === 'us-east-1'
+        ? 's3.amazonaws.com'
+        : `s3.${region}.amazonaws.com`;
+    const s3Url = `https://${bucket}.${domain}/${imageKey}`;
+
+    res.json({
+      analysis,
+      recordId: imageKey,
+      s3Url,
+    });
+
+    console.log('[scan] hoàn tất, lưu tại', imageKey, 'Region:', region);
+  } catch (error) {
+    console.error('Scan failed:', error);
+    const message =
+      error instanceof Error ? error.message : 'Không thể xử lý yêu cầu.';
+    res.status(500).json({ detail: message });
+  }
+});
+
+const port = Number(process.env.API_PORT) || 5050;
+
+app.get('/', (_req, res) => {
+  res.json({ status: 'ok', service: 'scanner-api' });
+});
+
+app.listen(port, () => {
+  console.log(`Scanner API đang chạy tại http://localhost:${port}`);
+});
+
