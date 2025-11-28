@@ -1,12 +1,29 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { handleScan } from '../scanService.js';
 
+const allowedOrigin = process.env.CORS_ORIGIN || 'https://face-read-ai-tuvi.vercel.app';
+
+const setCorsHeaders = (res: VercelResponse) => {
+  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Max-Age', '86400');
+};
+
 const methodNotAllowed = (res: VercelResponse) => {
-  res.setHeader('Allow', 'POST');
+  setCorsHeaders(res);
+  res.setHeader('Allow', 'POST, OPTIONS');
   res.status(405).json({ detail: 'Method Not Allowed' });
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  setCorsHeaders(res);
+
+  // Handle preflight OPTIONS request
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return methodNotAllowed(res);
   }
