@@ -4,7 +4,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
-import type { BiometricAnalysis } from './types';
+import type { BiometricAnalysis } from './types.js';
 
 const stripQuotes = (value?: string) => value?.replace(/^"(.*)"$/, '$1') ?? '';
 

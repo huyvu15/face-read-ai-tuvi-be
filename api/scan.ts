@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { handleScan } from '../scanService';
+import { handleScan } from '../scanService.js';
 
 const methodNotAllowed = (res: VercelResponse) => {
   res.setHeader('Allow', 'POST');

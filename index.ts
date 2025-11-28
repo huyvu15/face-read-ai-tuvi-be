@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express, { Request, Response } from 'express';
-import { handleScan } from './scanService';
+import { handleScan } from './scanService.js';
 
 const stripQuotes = (value?: string) => value?.replace(/^"(.*)"$/, '$1') ?? '';
 
