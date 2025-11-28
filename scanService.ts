@@ -44,19 +44,26 @@ const normalizeRegion = (value?: string | null) => {
 const ensureRegion = async () => {
   if (resolvedRegion) return resolvedRegion;
   if (preferredRegion) {
-    resolvedRegion = preferredRegion;
+    resolvedRegion = normalizeRegion(preferredRegion) || 'us-east-1';
     return resolvedRegion;
   }
 
-  const discoveryClient = new S3Client({
-    region: 'us-east-1',
-    credentials,
-  });
-  const result = await discoveryClient.send(
-    new GetBucketLocationCommand({ Bucket: bucket }),
-  );
-  resolvedRegion = normalizeRegion(result.LocationConstraint) || 'us-east-1';
-  return resolvedRegion;
+  try {
+    const discoveryClient = new S3Client({
+      region: 'us-east-1',
+      credentials,
+    });
+    const result = await discoveryClient.send(
+      new GetBucketLocationCommand({ Bucket: bucket }),
+    );
+    // LocationConstraint is null for us-east-1 buckets
+    resolvedRegion = normalizeRegion(result.LocationConstraint) || 'us-east-1';
+    return resolvedRegion;
+  } catch (error) {
+    console.warn('[s3] Failed to discover bucket region, defaulting to us-east-1', error);
+    resolvedRegion = 'us-east-1';
+    return resolvedRegion;
+  }
 };
 
 const getS3Client = async () => {
@@ -65,6 +72,8 @@ const getS3Client = async () => {
   s3Client = new S3Client({
     region,
     credentials,
+    // Force path-style addressing if needed
+    forcePathStyle: false,
   });
   return s3Client;
 };
@@ -91,8 +100,8 @@ const base64ToBuffer = (base64Image: string) => {
 const persistScanResult = async (base64Image: string) => {
   const objectKey = generateObjectKey();
   const body = base64ToBuffer(base64Image);
-  const client = await getS3Client();
-  const region = await ensureRegion();
+  let region = await ensureRegion();
+  let client = await getS3Client();
 
   try {
     await client.send(
@@ -103,9 +112,55 @@ const persistScanResult = async (base64Image: string) => {
         ContentType: 'image/jpeg',
       }),
     );
-  } catch (error) {
-    console.error('[s3] Upload failed', { region, bucket, objectKey, error });
-    throw error;
+  } catch (error: any) {
+    // If we get an endpoint error, try to extract the correct region from the error
+    if (
+      error?.message?.includes('endpoint') ||
+      error?.name === 'PermanentRedirect' ||
+      error?.$metadata?.httpStatusCode === 301
+    ) {
+      console.warn('[s3] Endpoint error, attempting to discover correct region');
+      
+      // Reset client and region to force rediscovery
+      s3Client = null;
+      resolvedRegion = null;
+      
+      // Try to get bucket location again
+      try {
+        const discoveryClient = new S3Client({
+          region: 'us-east-1',
+          credentials,
+        });
+        const result = await discoveryClient.send(
+          new GetBucketLocationCommand({ Bucket: bucket }),
+        );
+        region = normalizeRegion(result.LocationConstraint) || 'us-east-1';
+        
+        // Create new client with correct region
+        s3Client = new S3Client({
+          region,
+          credentials,
+          forcePathStyle: false,
+        });
+        client = s3Client;
+        
+        // Retry the upload
+        await client.send(
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: objectKey,
+            Body: body,
+            ContentType: 'image/jpeg',
+          }),
+        );
+      } catch (retryError) {
+        console.error('[s3] Retry failed', { region, bucket, objectKey, error: retryError });
+        throw retryError;
+      }
+    } else {
+      console.error('[s3] Upload failed', { region, bucket, objectKey, error });
+      throw error;
+    }
   }
 
   return { objectKey, region };
